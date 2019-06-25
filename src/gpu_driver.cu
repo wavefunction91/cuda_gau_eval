@@ -1,5 +1,6 @@
 #include <gpu_driver.hpp>
 #include <gau_kernel.hcu>
+#include <util.hpp>
 #include <algorithm>
 #include <numeric>
 #include <chrono>
@@ -108,11 +109,12 @@ __global__ void gau_eval_kernel( const int64_t npts, const int64_t nShell, const
   const int gp_indx = blockIdx.y * blockDim.y + threadIdx.y;
 
 
-  //printf("In kernel: {%d,%d,%d, %d}, {%d,%d,%d, %d}\n" ,
-  //       blockIdx.x, blockDim.x, threadIdx.x, sh_indx,
-  //       blockIdx.y, blockDim.y, threadIdx.y, gp_indx);
-
   if( sh_indx < nShell and gp_indx < npts ) {
+
+  //printf("In kernel: {%d,%d, %d}, {%d,%d, %d}\n" ,
+  //       blockIdx.x, threadIdx.x, sh_indx,
+  //       blockIdx.y, threadIdx.y, gp_indx);
+
 
     const Shell_device* shell_ptr = shells + sh_indx;
     const double xc = gX[gp_indx];
@@ -169,7 +171,7 @@ void gpu_driver(  int64_t npts,  const double* gX,  const double* gY,  const dou
     //cudaMalloc( &gY_d,   npts * sizeof(double) );
     //cudaMalloc( &gZ_d,   npts * sizeof(double) );
     //cudaMalloc( &eval_d, npts * sizeof(double) );
-    cudaMalloc( &g_d, (3*npts + shells.size()*npts)*sizeof(double) );
+    gpu_assert( cudaMalloc( &g_d, (3*npts + shells.size()*npts)*sizeof(double) ) );
     gX_d = g_d;
     gY_d = gX_d + npts;
     gZ_d = gY_d + npts;
@@ -178,9 +180,9 @@ void gpu_driver(  int64_t npts,  const double* gX,  const double* gY,  const dou
 
 
   timer.time( "send grid host -> device",[&]() {
-    cudaMemcpy( gX_d, gX, npts * sizeof(double), cudaMemcpyHostToDevice );
-    cudaMemcpy( gY_d, gY, npts * sizeof(double), cudaMemcpyHostToDevice );
-    cudaMemcpy( gZ_d, gZ, npts * sizeof(double), cudaMemcpyHostToDevice );
+    gpu_assert( cudaMemcpy( gX_d, gX, npts * sizeof(double), cudaMemcpyHostToDevice ) );
+    gpu_assert( cudaMemcpy( gY_d, gY, npts * sizeof(double), cudaMemcpyHostToDevice ) );
+    gpu_assert( cudaMemcpy( gZ_d, gZ, npts * sizeof(double), cudaMemcpyHostToDevice ) );
   });
 
 
@@ -192,8 +194,8 @@ void gpu_driver(  int64_t npts,  const double* gX,  const double* gY,  const dou
 
   char* shell_buff_d = nullptr;
   timer.time( "send shell buffer host -> device",[&]() {
-    cudaMalloc( &shell_buff_d, shell_buff.size() );
-    cudaMemcpy( shell_buff_d, shell_buff.data(), shell_buff.size(), cudaMemcpyHostToDevice );
+    gpu_assert( cudaMalloc( &shell_buff_d, shell_buff.size() ) );
+    gpu_assert( cudaMemcpy( shell_buff_d, shell_buff.data(), shell_buff.size(), cudaMemcpyHostToDevice ) );
   });
 
   // Get device data ptr array on host and send to device
@@ -204,8 +206,8 @@ void gpu_driver(  int64_t npts,  const double* gX,  const double* gY,  const dou
 
   Shell_device* dev_shells_d;
   timer.time( "send device shells host -> device",[&]() {
-    cudaMalloc( &dev_shells_d, dev_shells.size() * sizeof(Shell_device) );
-    cudaMemcpy( dev_shells_d, dev_shells.data(), dev_shells.size() * sizeof(Shell_device), cudaMemcpyHostToDevice );
+    gpu_assert( cudaMalloc( &dev_shells_d, dev_shells.size() * sizeof(Shell_device) ) );
+    gpu_assert( cudaMemcpy( dev_shells_d, dev_shells.data(), dev_shells.size() * sizeof(Shell_device), cudaMemcpyHostToDevice ) );
   });
 
 
@@ -217,13 +219,22 @@ void gpu_driver(  int64_t npts,  const double* gX,  const double* gY,  const dou
   dim3 block_sz, grid_sz;
   block_sz.x = 16;
   block_sz.y = 16;
-  grid_sz.x = std::max(1u,int(shells.size()+1)/block_sz.x);
-  grid_sz.y = std::max(1u,int(npts+1)/block_sz.y);
+  //block_sz.x = 2;
+  //block_sz.y = 2;
+  grid_sz.x = std::max(1u,int(shells.size()+block_sz.x-1)/block_sz.x);
+  grid_sz.y = std::max(1u,int(npts + block_sz.y-1)/block_sz.y);
 
-  //std::cout << "grid: " << grid_sz.x << ", " << grid_sz.y << std::endl;
-  //std::cout << "block: " << block_sz.x << ", " << block_sz.y << std::endl;
+  std::cout << "grid: " << grid_sz.x << ", " << grid_sz.y << std::endl;
+  std::cout << "block: " << block_sz.x << ", " << block_sz.y << std::endl;
   timer.time( "gpu kernel eval (device)",[&]() {
-    gau_eval_kernel<<<grid_sz, block_sz>>>( npts, shells.size(), gX_d, gY_d, gZ_d, dev_shells_d, eval_d );
+
+    int64_t nshell = shells.size();
+    auto params = conv_pack(npts, nshell, gX_d, gY_d, gZ_d, dev_shells_d, eval_d);
+
+//  gau_eval_kernel<<<grid_sz, block_sz>>>( npts, shells.size(), gX_d, gY_d, gZ_d, dev_shells_d, eval_d );
+
+    cudaLaunchKernel( (void*)gau_eval_kernel, grid_sz, block_sz, params.data() );
+
   });
 
   // call kernel
@@ -234,7 +245,7 @@ void gpu_driver(  int64_t npts,  const double* gX,  const double* gY,  const dou
 
   cudaDeviceSynchronize();
   timer.time( "recv basis eval device -> host",[&]() {
-    cudaMemcpy( eval, eval_d, shells.size()*npts * sizeof(double), cudaMemcpyDeviceToHost );
+    gpu_assert( cudaMemcpy( eval, eval_d, shells.size()*npts * sizeof(double), cudaMemcpyDeviceToHost ) );
   });
 
   cudaFree( g_d );

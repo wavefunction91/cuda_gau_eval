@@ -1,6 +1,15 @@
 #include <libint2/shell.h>
 #include <timer.hpp>
 
+
+#ifdef NDEBUG
+  #define gpu_assert( expr ) (expr);
+#else
+  #define gpu_assert( expr ) assert((expr)==cudaSuccess);
+#endif
+
+
+
 struct Shell_device {
 
   int l;

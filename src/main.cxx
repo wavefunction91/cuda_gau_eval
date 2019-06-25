@@ -8,13 +8,18 @@
 #include <libint2/shell.h>
 #include <gau2grid_driver.hpp>
 #include <gpu_driver.hpp>
+#include <gpu_alloc.hpp>
 #include <timer.hpp>
+#include <util.hpp>
 
 using cart_t = std::array<double,3>;
 
 int main() {
 
   wakeup_gpu();
+
+  cuda_memory_resource cuda_mem;
+  device_vector<double> v(5, &cuda_mem);
 
   // Random
   std::default_random_engine gen;
@@ -25,8 +30,8 @@ int main() {
   auto irand_gen = [&](){ return dist_int(gen); };
 
   // Construct shells
-  //const size_t nShells = 1000;
-  const size_t nShells = 17;
+  //const size_t nShells = 5000;
+  const size_t nShells = 1980;
   std::vector< libint2::Shell > shells;
   shells.reserve(nShells);
 
@@ -54,7 +59,7 @@ int main() {
 
   // Generate grid
   //const size_t nGrid = 5000;
-  const size_t nGrid = 17;
+  const size_t nGrid = 57;
   std::vector<double> gX(nGrid), gY(nGrid), gZ(nGrid);
 
   std::generate( gX.begin(), gX.end(), rrand_gen );
